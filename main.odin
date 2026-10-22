@@ -122,6 +122,7 @@ ERROR_SERVICE_NOT_ACTIVE :: 1062
 ERROR_FAILED_SERVICE_CONTROLLER_CONNECT :: 1063
 ERROR_SERVICE_MARKED_FOR_DELETE :: 1072
 ERROR_SERVICE_EXISTS :: 1073
+ERROR_CANCELLED :: 1223
 
 SE_PRIVILEGE_ENABLED :: 0x2
 SE_SYSTEMTIME_NAME :: "SeSystemtimePrivilege"
@@ -186,9 +187,27 @@ main :: proc() {
 
     defer win.WSACleanup()
 
-    command := len(os.args) > 1 ? os.args[1] : "help"
-    arg := len(os.args) > 2 ? os.args[2] : ""
+    args := os.args[1:]
+
+    // The elevated copy started by run_elevated writes its output to a file for the original process to print.
+    if len(args) >= 2 && args[0] == "--output" {
+        f, err := os.open(args[1], os.O_WRONLY | os.O_CREATE | os.O_TRUNC)
+
+        if err == nil {
+            os.stdout = f
+            os.stderr = f
+        }
+
+        args = args[2:]
+    }
+
+    command := len(args) > 0 ? args[0] : "help"
+    arg := len(args) > 1 ? args[1] : ""
     ok := true
+
+    if (command == "install" || command == "uninstall" || command == "sync") && !is_elevated() {
+        os.exit(run_elevated(args))
+    }
 
     switch command {
     case "help", "-h", "--help", "/?":
@@ -226,7 +245,8 @@ Commands:
   status            Show clock offset, time zone and service state
   sync [server]     Synchronize the clock now
 
-install, uninstall and sync require an elevated (administrator) prompt.`)
+install, uninstall and sync require administrator rights and will show a UAC prompt
+when run from a non-elevated terminal.`)
     fmt.printf("\nDefault servers: %s\n", strings.join(DEFAULT_SERVERS[:], ", ", context.temp_allocator))
     fmt.printf("Log file:        %s\n", log_path())
 }
@@ -450,6 +470,84 @@ cmd_service :: proc() -> bool {
     }
 
     return true
+}
+
+// ---------------------------------------------------------------------------
+// Elevation
+// ---------------------------------------------------------------------------
+
+is_elevated :: proc() -> bool {
+    token: win.HANDLE
+
+    if !win.OpenProcessToken(win.GetCurrentProcess(), win.TOKEN_QUERY, &token) {
+        return false
+    }
+
+    defer win.CloseHandle(token)
+
+    elevated: win.DWORD
+    size: win.DWORD
+
+    if !win.GetTokenInformation(token, .TokenElevation, &elevated, size_of(elevated), &size) {
+        return false
+    }
+
+    return elevated != 0
+}
+
+// Reruns this executable with the given arguments as administrator (shows a UAC prompt),
+// waits for it to finish, prints its output and returns its exit code.
+run_elevated :: proc(args: []string) -> int {
+    exe, err := os.get_executable_path(context.temp_allocator)
+
+    if err != nil {
+        fmt.eprintln("error: cannot determine executable path")
+
+        return 1
+    }
+
+    temp_dir, _ := os.temp_directory(context.temp_allocator)
+    output_path := fmt.tprintf(`%s\timesync-%d.out`, strings.trim_right(temp_dir, `\`), win.GetCurrentProcessId())
+
+    params := strings.builder_make(context.temp_allocator)
+    fmt.sbprintf(&params, `--output "%s"`, output_path)
+
+    for a in args {
+        fmt.sbprintf(&params, ` "%s"`, a)
+    }
+
+    info := win.SHELLEXECUTEINFOW{
+        cbSize = size_of(win.SHELLEXECUTEINFOW),
+        fMask = win.SEE_MASK_NOCLOSEPROCESS | win.SEE_MASK_NOASYNC,
+        lpVerb = win.L("runas"),
+        lpFile = win.utf8_to_wstring(exe),
+        lpParameters = win.utf8_to_wstring(strings.to_string(params)),
+        nShow = win.SW_HIDE,
+    }
+
+    if !win.ShellExecuteExW(&info) {
+        if win.GetLastError() == ERROR_CANCELLED {
+            fmt.eprintln("error: administrator rights are required, the UAC prompt was declined")
+        } else {
+            print_win_error("cannot start elevated process")
+        }
+
+        return 1
+    }
+
+    defer win.CloseHandle(info.hProcess)
+
+    exit_code: win.DWORD
+    win.WaitForSingleObject(info.hProcess, win.INFINITE)
+    win.GetExitCodeProcess(info.hProcess, &exit_code)
+
+    if data, read_err := os.read_entire_file(output_path, context.temp_allocator); read_err == nil {
+        fmt.print(string(data))
+    }
+
+    os.remove(output_path)
+
+    return int(exit_code)
 }
 
 // ---------------------------------------------------------------------------

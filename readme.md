@@ -36,11 +36,11 @@ timesync <command> [server]
 | `status` | Show clock offset, time zone and service state |
 | `sync [server]` | Synchronize the clock now, optionally with a specific server |
 
-`install`, `uninstall` and `sync` require an elevated (administrator) prompt. On Windows 11 with Sudo enabled you can also use `sudo timesync sync`.
+`install`, `uninstall` and `sync` require administrator rights. When run from a normal terminal they show a UAC prompt, run elevated in the background and print the result in the same terminal.
 
 ### Installing the service
 
-Place `timesync.exe` where you want it to live (for example `C:\Program Files\timesync\`), then from an administrator prompt run:
+Place `timesync.exe` where you want it to live (for example `C:\Program Files\timesync\`), then run:
 
 ```
 timesync install
